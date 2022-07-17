@@ -1,0 +1,599 @@
+---
+title: "Churn prediction of airline clients"
+author: "Kostrova Anna"
+date: "12/14/2020"
+output: 
+    html_document:
+      theme: readable
+      code_folding: hide
+      toc: true
+      toc_float: true
+---
+
+# Intro
+The main aim of our analysis is to provide recommendations how to increase number of loyal clients, i.e. number of clients with Loyalty card. We identified that the fact of having loyalty card is connected with the overall satisfaction of company's services provided. 
+
+During the analysis we came up with the conclusion that to increase number of loyal clients company should inform clients more about Loyalty card program, especially clients of the age 40+. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# knitr::opts_chunk$set(fig.width = 8, fig.height = 5)
+```
+```{r message=FALSE, warning=FALSE}
+# Для начала необходимо загрузить библиотеки и необходимые данные. Для удобства работы данные были немного изменены. Стандартизация, суммирование некоторых перменных и другие преобрахования были сразу сохранены в данные. 
+library(gtable)
+library(purrr)
+library(cluster)
+library(ggcorrplot)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(psych)
+library(GGally)
+library(gridExtra)
+library(kableExtra)
+library(grid)
+library(gtable)
+library(caret)
+library(MASS)
+library(pROC)
+library(corrplot)
+library(e1071)
+library(plotly)
+library(DT)
+library(BiocManager)
+library(Rgraphviz)
+library(naniar)
+library(rpart)
+library(rpart.plot)
+# install.packages("vip")
+# install.packages("rpart")
+# install.packages("rpart.plot")
+# # install.packages("arsenal")
+# library(rpart)
+# library(rpart.plot)
+library(vip)
+library(formattable)
+```
+
+# Description of the data
+
+Overall, company has data about 62077 observations. All clients are from Russia, from 15 Russian cities such as Moscow, Saint-Petersburg, Kazan, Grozny, Vladivostok, Novosibirsk, Yekaterinburg, Nizhny Novgorod, Omsk, Samara, Murmansk, Cheboksary, Stavropol, Khabarovsk and Kurgan. From them only 33% of clients are owners of the Loyalty card, while 67% of clients do not have it. 
+
+Describing clients more precisely, the mean age of clients with Loaylty card is 30, while clients without the card are older - their mean age is 38. The largest percentage of loyal clients is observed among business class passengers, while passengers of the Econom+ are the least loyal. Among loyal clients there are more people, who satisfied with the services provided by the company. However, more than 50% of disloyal clients are also satisfied with services. Overall, there were 14 variables, which were used to describe services. They covered online services, services provided during the flight and services related to the check-in, boarding and baggage. 
+
+## Data cleansing
+
+We cleaned up the data with the aim to conduct further analysis easier. Firslty, we found out that data contains some observations without estimation by some parameters, i.e. unfinished questionnaires. We deleted these observations, because they will provide unprecise evaluation of the services. Secondly, we deleted observation with the clients whose age was less that the number of years thay spent with company. Overall, after mentioned manipulations we received 54334 observations, which we suggested to be enough for the analysis. 
+Besides, we suggested that the variables of satisfaction with convenient time of the flight and location of the gate in the airport cannot be improved by the comany due to the fact that they are highly influenced by external factors. Such as, for example, gate location depends of the airport and time of the flight is influenced by other companys' flights, season of the year, expected number of passengers, etc.  
+
+## Graph 1. Comparison of loyal and disloyal clients. 
+```{r message=FALSE, warning=FALSE}
+airdata2 <- read_csv("~/Documents/БИЗНЕСАНАЛ/airdata_last.csv")
+airdata2 = airdata2 %>% dplyr::select(-years_customer, -X1)
+airdata2[airdata2 == 0] <- NA
+# kable(sum(is.na(airdata2)))%>% 
+ #  kable_styling(bootstrap_options=c("bordered", "responsive","striped"), full_width = FALSE)
+airdata2 = airdata2 %>% na.omit
+airdata2 = airdata2 %>% dplyr::select(-sat_Time_convenient, -sat_Gate_location) %>% filter(diff >0)
+
+# Это мы сохраняем основную тему, которую будем использовать в дальнейшем для визуалициии графиков.
+th = theme(plot.title = element_text(size=14, hjust = 0.5, face="bold"),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        rect = element_blank(),
+        panel.grid.major.y = element_line(color = "grey92", size = 0.5))
+
+#The graph shows percentages of loyal and disloyal clients. It shows how big is the problem and whether there is space for development.
+p = airdata2 %>% 
+  group_by(Loyalty_card) %>% 
+  summarise(Number = n()) %>%
+  mutate(Percent = round(prop.table(Number)*100),0) %>% 
+ggplot(aes(Loyalty_card, Percent)) + 
+  geom_col(aes(fill = Loyalty_card)) +
+  labs(x = "Presence of Loyalty card", fill = "Loyalty card",
+    title = "Loyalty of clients in percentages") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_text(aes(label = sprintf("%.2f%%", Percent)), vjust = 7,size = 4) + 
+  th
+
+p
+
+legend = gtable_filter(ggplotGrob(p), "guide-box")
+```
+
+Only 33% of clients have Loyalty card and can be described as "Loyal". It means that there are quite big number of clients, who can be involved in the loyalty program in the future after the company will apply policies for increasing customers' loyalty.
+
+
+## Graph 2 and 3. Exploration of loyalty and satisfaction among passenger by their Class modal.
+```{r}
+#Graph, which shows distribution of loyalty card in percentages by class modal. 
+p1 = airdata2 %>% dplyr::select(Class_modal,Loyalty_card) %>% mutate(Class_modal = as.factor(Class_modal), Loyalty_card = as.factor(Loyalty_card)) %>% ggplot(aes(x=Class_modal, fill= Loyalty_card)) + 
+  geom_bar(position = 'fill') +
+  labs(x = "", y = "", fill = "Loyalty card",
+       title = "Percentage of loyalty card owners based on flight's class") +
+  geom_text(data = . %>% 
+              group_by(Class_modal, Loyalty_card) %>%
+              tally() %>%
+              mutate(p = n / sum(n)) %>%
+              ungroup(),
+            aes(y = p, label = scales::percent(p)),
+            position = position_stack(vjust = 0.5),
+            show.legend = FALSE) + 
+  scale_y_continuous(labels = scales::percent)+ 
+  th
+
+#graph with percentages of satisfaction by class modal
+p2 = airdata2 %>% dplyr::select(Class_modal,Satisfaction_bin) %>% mutate(Class_modal = as.factor(Class_modal), Satisfaction_bin = as.factor(Satisfaction_bin)) %>% ggplot(aes(x=Class_modal, fill= Satisfaction_bin)) + 
+  geom_bar(position = 'fill') +
+  labs(x = "", y = "",fill = "Satisfaction",
+       title = "Percentage of loyalty card owners based on flight's class") +
+  geom_text(data = . %>% 
+              group_by(Class_modal, Satisfaction_bin) %>%
+              tally() %>%
+              mutate(p = n / sum(n)) %>%
+              ungroup(),
+            aes(y = p, label = scales::percent(p)),
+            position = position_stack(vjust = 0.5),
+            show.legend = FALSE) + 
+  scale_y_continuous(labels = scales::percent)+ 
+  th
+
+#plot graphs together for comparison
+grid.arrange(p1, p2, nrow = 2)
+```
+
+The largest percentage of loyalty card owners is among passengers of Business class. In the classes Econom and Econom+ percentge of loyalty card owners is relatively small.  
+If we look at the percentages of satisfaction, we can see that there is no large difference of satisfaction between different classes. However, the lowest percentage of satisfaction is observed in the class Econom+, which also has lowest percantage of loyalty card owners.
+
+
+## Graph 4-5. Client's age, Loyalty card and Satisfaction. 
+```{r message=FALSE, warning=FALSE}
+#Graph, which shows distribution of age by loyalty card. 
+p5 = ggplot(airdata2, aes(x = Age, fill = Loyalty_card)) +
+      geom_histogram(alpha = 0.5) +
+  labs(fill = "Loyalty card") + 
+  xlab("Age") + 
+  ylab("Number of clients") +
+  ggtitle("Number of Loyalty card owners based on their age") + 
+  th
+
+p6 = ggplot(airdata2, aes(x = Age, fill = Satisfaction_bin)) +
+      geom_histogram(alpha = 0.5) +
+  labs(fill = "Satisfaction level") + 
+  xlab("Age") + 
+  ylab("Number of clients") +
+  ggtitle("Number of satisfied clients based on their age") + 
+  th
+
+grid.arrange(p5,p6, nrow = 2)
+```
+
+It is seen from the graph that clients older 40 have relatively less Loyal cards, while there are quite a lot of people in this age group, who are satisfied with services. 
+
+
+## Key business metric - LTV (Lifetime value). 
+
+As a key business metric we chose clients' Lifetime value, because it shows how much profit particular customer will bring to the company. 
+```{r message=FALSE, warning=FALSE}
+#LTV by loyalty card
+p3 = ggplot(airdata2, aes(x = LTV, fill = Loyalty_card)) +
+      geom_histogram(alpha = 0.5) +
+  labs(fill = "Loyalty card status") + 
+  xlab("LTV") + 
+  ylab("Number of clients") +
+  ggtitle("Number of loyalty card owners based on LTV") + 
+  th
+
+
+#LTV by class modal
+p4 = ggplot(airdata2, aes(x = days_customer, fill = Loyalty_card)) +
+      geom_histogram(alpha = 0.5) +
+  labs(fill = "Loyalty card") + 
+  xlab("Days with company") + 
+  ylab("Number of clients") +
+  ggtitle("Number of Loyalty card owners based on days spent with company") + 
+  th
+
+grid.arrange(p3, p4, nrow = 2 )
+```
+
+Expected lifetime value of loyal customers is much more higher than expected lifetime value of customers, who do not have Loyalty card (first graph). At the same time, the second graph shows that many "old" customers do not have Loyalty card, while the number of Loyalty card among clients who stay with compny less than 1 year is quite significan comparing with customers, who are with the company more than 1 year.
+
+
+## Exploration of service scores.
+Service scores demonstrate quality of services provided from client's point of view. These scores helps to estimate the level of client's satisfaction and identify problematic areas in services that the client uses.   
+
+The table shows mean scores of services' evaluation by clients.
+
+```{r}
+# service = airdata2[,10:21]
+# service %>% mutate(id = row_number()) %>% group_by(id) %>% mutate()
+# describe(service)  %>% kable() %>% kable_styling(bootstrap_options=c("bordered", "responsive","striped"), full_width = FALSE)
+
+`Service Satisfaction` <- c("Seat comfort ","Food ", "Wi-fi ", "Entertaiment ","Online support ", "Online Booking","Board service", "Legroom", "Baggage handling", "Checkin", "Cleaness of salon", "Boarding")
+
+Mean <- c("2.906173","2.884308", "3.162937", "3.142673","3.308904", "3.322340","3.423363", "3.450676", "3.753488", "3.350849", "3.773089", "3.253028")
+
+Coef_tab <- data.frame(`Service Satisfaction`, Mean)
+library(formattable)
+formattable(Coef_tab, 
+            align =c("l","l"), 
+            list(`Indicator Name` = formatter(
+              "span", style = ~ style(color = "grey",font.weight = "bold"))))
+```
+
+Overall, customers are less satisfied with Food service (2.8), comfortability of seats (2.9), Wifi service (3.2) general level of flight entertainment (3.1).
+
+## Hypotheses
+
+Based on mean satisfaction data we can figure out few hypotheses:
++ **Hypothesis 1:** If quality of food increases, more clients would fly with our company more often. Thus, more clients would become loyal.  
++ **Hypothesis 2:** If level of entertainment increases, more clients would fly with our company more often. Thus, more clients would become loyal.  
++ **Hypothesis 3:** If quality of WiFi in our company increases (clients would be able to use it more effortlessly, it would work faster), more clients would fly with our company more often. Thus, more clients would become loyal.  
+
+Increasing seat comfort would mean changing seats in airplanes, which is too costly. Profit that the company could get from increasing seat comfort seems less than expenses on it. Increasing quality of food, Wifi and entertainment seems more profitable.  
+In addition, such parameters as gate location and time of the flight are defined by airport, not by the company. So, we can't change these rates.
+
+Talking about increasing satisfaction rates on food, the company should figure out reasons for such low rates. It could be low quality of food (customers find served food not tasty enough, it could be served too cold or too hot, food can look unpleasant to eat, and etc.), also the reason for low rates can be limited menu (no options for vegans, allergic people and etc), or the reason might be the time of serving, the amount of food served or some other reasons. That is why the company should allow clients to comment on low rates, gather data about route of a problem and fix it according to results of survey. 
+
+All in all, we recommend the company to put optional open questions in their satisfaction survey and gather text data for better understanding of flaws.
+
+# Loyalty increasing policies
+
+In this section, we would like to suggest some policies to help a company improve customer loyalty. Our suggestions are based on exploratory analysis and clustering, as well as machine learning techniques. In the process of work, we used advanced technologies for cluster analysis and PCA analysis (principal component analysis). Unfortunaty, PCA analisys did not meet our expectations and we did not include it in the final report. The following will provide information on the clusters. 
+
+```{r message=FALSE, warning=FALSE}
+# Here we perform a PCA (principal component analysis), which is necessary to build a regression model. PCA helps us to get rid of multicollinearity by reducing the number of predictive variables and improving the interpretability of the model.
+
+# # PCA
+#airdata2_PCA = airdata2 %>% dplyr::select(LTV, days_customer, sat_Seat_comfort, sat_Food, sat_Wifi, sat_Entertainment, sat_online_support, sat_ease_of_online_booking, sat_onboard_service, sat_legroom, sat_baggage_handling, sat_checkin, sat_clean_salon, sat_boarding)
+#airdata2_PCA = airdata2_PCA %>% scale() %>% as.data.frame()
+#library(stats)
+#pcaAir = prcomp(airdata2_PCA)
+#kable(round(pcaAir$rotation[, 1:6],2))
+
+# Thus, in the table we can see the correlation of the numeric variables of our dataset and the 6 components. Thus, the variables sat_Wifi, sat_online_support, sat_ease_of_online_booking and sat_boarding correlate equally well with the first component, and can therefore be combined into one class "Online services". The variables sat_Seat_comfort, sat_Food, sat_Entertainment in turn correlate with the second component. We can also combine them into the "Onboard services" category. The third component also correlates well with variables such as sat_onboard_service, sat_baggage_handling and sat_clean_salon, which are combined into the class 'Quality of Service'.
+
+# Next, we need to understand the most appropriate number of components to keep and use for the regression model.
+
+# screeplot(pcaAir, type = "lines")
+# box()
+# abline(h = 1, lty = 2)
+
+# So the most appropriate number of components is five. We have used three ways of determining this value, two of which recommend choosing five components and one recommends choosing six. So, with the priority of the majority, we settled on 5.
+
+# Here we proceed to the construction of the regression model. First, we run it by selecting all 14 variables for Loyalty_card prediction, and check the quality of the resulting model, namely the R^2 value, which indicates the proportion of variance of the predicted variable that our model explains
+
+
+#airdata_reg= airdata2 %>% dplyr::select(Loyalty_card, LTV, days_customer, sat_Seat_comfort, sat_Food, sat_Wifi, sat_Entertainment, sat_online_support, sat_ease_of_online_booking, sat_onboard_service, sat_legroom, sat_baggage_handling, sat_checkin, sat_clean_salon, sat_boarding)
+
+#airdata_reg$Loyalty_card = as.numeric(airdata_reg$Loyalty_card == "Loyal")
+#model1 = lm(Loyalty_card ~.,airdata_reg)
+#library(car)
+#summary(model1)
+
+# Thus, the R^2 value is quite low, only 24%, indicating the low quality of the resulting model. Moreover, this model is loaded with multicollinearity and difficulties with its interpretation.
+
+# Let's build a regression model based on our chosen five components and look at its quality as well.
+
+#dataCustComponents <- cbind(airdata_reg[, "Loyalty_card"], pcaAir$x[,1:5]) %>% as.data.frame
+#mod2 <- lm(Loyalty_card ~ ., dataCustComponents)
+#summary(mod2)
+
+# Unfortunately, the quality of the model has only worsened and is now only 22%. The model is still questionable in its interpretation, although we managed to improve this aspect and get rid of multicollinearity. Thus, we decide that this model is untenable when it comes to predicting customer loyalty. We do not return to these models and do not use them.
+```
+
+Based on empirically obtained results, it was decided to take four clusters for cluster analysis. Two out of four clusters turned out to be very outliers - the number of disloyal customers in these clusters turned out to be approximately 81%. 
+
+During detailed analysis, some common characteristics were found between the groups:  
+
++ **both clusters turned out to be the "oldest" of all** (the average age was higher than the average age in all data, and the values of the 3rd quantile were significantly higher in both groups)  
+
++ LTV of customers in these clusters was approximately the same and average, relative to two other clusters  
+
++ since the 2nd cluster had the most profitable customers in terms of LTV (it also had the most business class) 
+
++ the 4th cluster, on the contrary, had the lowest rates of LTV 
+
++ Cluster 1 differs in the length of being the company clients - they use the services of the company longer than others  
+
++ Customers of the 3rd cluster rated services higher than customers in other clusters  
+
++ At the same time, the ratio of satisfied and unsatisfied customers in the 3rd cluster was distributed approximately 50-50: 55.7% - dissatisfied customers and 44.3% - satisfied.  
+
++ In the 3rd cluster there were more women than men, 63.8% and 36.2%, respectively.
+
+Hence, the influence of services rates appeared to be not as important for clustering. Gender and age appeared to be more important.  
+In conclusion, we think that company should focus on targeting clients of 3rd cluster, because these customers are the most satisfied, but still most of them don't own loyalty cards. Average amount of time spent being a client for this cluster is 1-2 years. Maybe **they have to be better informed about loyalty card and its bonuses** to become a loyal client.
+
+```{r}
+airdata_cluster = airdata2 %>% dplyr::select(LTV_stand, days_stnd, all_services_stand)
+
+# tot_withinss <- map_dbl(1:10,  function(k){
+#   set.seed(123)
+#   model <- kmeans(x = airdata_cluster, centers = k)
+#   model$tot.withinss
+# })
+# 
+# # Generate a data frame containing both k and tot_withinss
+# elbow_df <- data.frame(
+#   k = 1:10,
+#   tot_withinss = tot_withinss
+# )
+# 
+# # Plot the elbow plot
+# elbow_plot = ggplot(elbow_df, aes(x = k, y = tot_withinss)) +
+#   geom_line() +
+#   labs(x = "Number of clusters", y ="Total within-cluster sum of squares",title = "Elbow plot") +
+#   scale_x_continuous(breaks = 1:10) + theme_linedraw() +
+#   theme(plot.title = element_text(size=14, hjust = 0.5, face="bold"))
+# 
+# elbow_plot
+
+set.seed(123)
+clusters <- kmeans(airdata2[,23:25], 4)
+
+# Save the cluster number in the dataset as column 'Borough'
+airdata2$Cluster <- as.factor(clusters$cluster)
+
+# # Group by the cluster assignment and calculate averages
+# airdata_clus_avg <- airdata2 %>%
+#     dplyr::select(Cluster, LTV_stand, days_stnd, all_services_stand) %>%
+#     group_by(Cluster) %>%
+#     summarize_if(is.numeric, mean)
+# 
+# # Create the min-max scaling function
+# min_max_standard <- function(x) {
+#   (x - min(x))/(max(x)-min(x))
+# }
+# 
+# # Apply this function to each numeric variable in the bustabit_clus_avg object
+# airdata_avg_minmax <- airdata_clus_avg %>%
+#     mutate_if(is.numeric, min_max_standard)
+# 
+# # Load the GGally package
+#               
+# # Create a parallel coordinate plot of the values, starts with column 2
+# parrallel_plot = ggparcoord(airdata_avg_minmax, columns = 2:ncol(airdata_avg_minmax), groupColumn = "Cluster", scale = "globalminmax", order = "skewness")  +
+#   labs(x = "", title = "Parallel Coordinate Plot") + theme_linedraw() +
+#   theme(plot.title = element_text(size=14, hjust = 0.5, face="bold"))
+
+clusters_plot = airdata2 %>% ggplot(aes(x=Cluster,fill=Loyalty_card)) + 
+  geom_bar(position = 'fill') +
+  labs(y = "Percent", title = "Loyalty of cluents by clusters") +
+  geom_text(data = . %>% 
+              group_by(Cluster, Loyalty_card) %>%
+              tally() %>%
+              mutate(p = n / sum(n)) %>%
+              ungroup(),
+            aes(y = p, label = scales::percent(p)),
+            position = position_stack(vjust = 0.5),
+            show.legend = FALSE) + 
+  scale_y_continuous(labels = scales::percent)+ theme_linedraw() +
+  theme(plot.title = element_text(size=14, hjust = 0.5, face="bold"))
+
+clusters_plot
+# grid.arrange(parrallel_plot, clusters_plot, nrow = 2)
+
+# an = airdata2[,-(22:26)]
+# an = an %>% dplyr::select(-X1)
+# an$Loyalty_card = as.factor(an$Loyalty_card)
+# an$Satisfaction_bin = as.factor(an$Satisfaction_bin)
+# an$Class_modal = as.factor(an$Class_modal)
+# an$Gender = as.factor(an$Gender)
+# 
+# an[,9:20] <- lapply(an[,9:20], factor)
+# an = an %>% dplyr::select(-Home_city)
+# library(arsenal) 
+# my_controls = tableby.control(
+#   test = T,
+#   total = T,
+#   numeric.test = "kwt", cat.test = "chisq",
+#   numeric.stats = c("meansd", "q1q3", "min", "max"),
+#   cat.stats = c("countpct"),
+#   stats.labels = list(
+#     meansd = "Mean (SD)",
+#     q1q3 = "Q1, Q3",
+#     max = "Max",
+#     min = "Min"
+#   ),
+#   digits = 0L
+# )
+# 
+# table_one <- tableby(Cluster ~ ., data = an, control = my_controls) 
+# summary(table_one)
+```
+
+We can see on the graph below that most loyalty card owners are young people of ages 20 to 50. Already after the age ~40 loyalty card owners decrease in relation to disloyal customers of the same age group. In addition, clusters of older ages of customers are the ones with little amount of loyal customers (clusters 1 and 3 have higher mean age and higher standard deviation).  
+Thus, we suppose that maybe older generation don't use loyalty cards due to few knowledge of its benefits. Maybe **if the airline company worked on informing older customers about benefits of loyalty card, and even provided special benefits for senior clients, loyalty rates would go high quickly.**
+
+```{r message=FALSE, warning=FALSE}
+ggplot(airdata2, aes(x = Age, color = Loyalty_card, fill = Loyalty_card)) + 
+  geom_histogram(alpha = 0.5) + 
+  labs(fill = "Loyalty card status") + 
+  xlab("Age") + 
+  ylab("Count") + 
+  ggtitle("Number of loyalty card owners based on\n how long cluent with the company (in days)") + th
+```
+
+
+## Second policy
+
+In this section, we offer a loyalty enhancement policy based on machine learning methods. More specifically, here we have built several predictive models, the first of which is logistic regression, the second is a prediction tree, and the third is a prediction tree using cross-validation. We also compared all the quality indicators of the obtained models and determined the most suitable one for us, namely, the first one - a simple prediction tree.
+
+```{r message=FALSE, warning=FALSE}
+
+# Further details on the results of each method are given below.
+# It is necessary to split the data into test and training samples and get rid of unnecessary variables.
+
+airdata_model =  airdata2 %>% dplyr::select(-`...1`, -Home_city, -sum, -diff, -Cluster, -LTV_stand, -all_services_stand, -days_stnd)
+
+airdata_model$Loyalty_card = as.factor(airdata_model$Loyalty_card)
+airdata_model$Gender = as.factor(airdata_model$Gender)
+airdata_model$Class_modal = as.factor(airdata_model$Class_modal)
+airdata_model$Satisfaction_bin = as.factor(airdata_model$Satisfaction_bin)
+
+set.seed(1234)
+ind = createDataPartition(airdata_model$Loyalty_card, p = 0.20, list = F) 
+df.test = airdata_model[ind,] 
+df.train = airdata_model[-ind,]
+# Here we build a simple prediction tree and assess the quality of the resulting model.
+
+set.seed(1234)
+tree1 <- rpart(Loyalty_card~., method = "class", data = df.train)
+prp(tree1)
+# rpart.plot(tree1)
+# df.train$pred <- predict(object = tree1, newdata = df.train, type = "class")
+# confusionMatrix(data = df.train$pred, reference = df.train$Loyalty_card, mode = "prec_recall")
+# df.test$pred <- predict(object = tree1, newdata = df.test, type = "class")
+# confusionMatrix(data = df.train$pred, reference = df.train$Loyalty_card, mode = "prec_recall")
+# confusionMatrix(data = df.test$pred, reference = df.test$Loyalty_card, mode = "prec_recall")
+
+# We describe the quality of the model below.
+
+# Next, let's look at a model based on the logistic regression method. We build two models, the first is a classical logistic regression and the second is built using the stepAIC method, which allows the algorithm to build several models and choose the best one, revealing the best combination of variables.
+
+# Logistic regression
+# logitModelFull <- glm(Loyalty_card~., family = binomial, df.train)
+# #Build the new model
+# logitModelFull_new <- stepAIC(logitModelFull,trace = 0) 
+# summary(logitModelFull_new)
+# train <- predict(logitModelFull, df.train, type="response")
+# pred <- factor(ifelse(train > 0.5,"Loyal","Disloyal"))
+# confusion <- caret::confusionMatrix(pred, df.train$Loyalty_card, mode = "prec_recall")
+# 
+# 
+# train1 <- predict(logitModelFull_new, df.train, type="response")
+# pred1 <- factor(ifelse(train1 > 0.5,"Loyal","Disloyal"))
+# confusion1 <- caret::confusionMatrix(pred1, df.train$Loyalty_card, mode = "prec_recall")
+# 
+# confusion
+# confusion1
+
+# Thus, we obtained the following quality scores identical for both models.
+# For the first model: Accuracy = 85%, Precision = 86%, Recall = 93%, F1 = 89%.
+# For the second model: Accuracy = 85%, Precision = 86%, Recall = 93%, F1 = 89%.
+
+# Finally, we proceed to build the model using a predictive tree using crossvalidation. This method is distinguished by the fact that in the process of model building the algorithm divides the data into test and training samples several times, which can lead to more accurate results and higher quality metrics.
+
+# set.seed(100)
+# cv5<-trainControl(method="cv", number = 5)
+# set.seed(100)
+# tree_model <- caret::train(Loyalty_card~., method = 'ctree', data = df.train, trControl=cv5)
+# plot(tree_model$finalModel, type="simple")
+# predictions.on.train <- predict(tree_model, df.train)
+# predictions.on.test <- predict(tree_model, df.test)
+
+# confusionMatrix(predictions.on.train, df.train$Loyalty_card, positive = "Loyal", mode = "prec_recall")
+# confusionMatrix(predictions.on.test, df.test$Loyalty_card, positive = "Loyal", mode = "prec_recall")
+
+# Model quality: Accuracy = 85%, Precision = 86%, Recall = 93%, F1 = 89%.
+```
+
+The results of the model on the test sample are as follows: Recall is about 93%. This means that the model correctly identified 93% of the loyal customers, out of the total number of loyal customers. The model's Precision was about 86%, indicating that 86% of the loyal customers the model identified were indeed loyal and 14% were disloyal. F1 score-about 90%. Accuracy is 86%. It is important to clarify here that Precision was the key indicator for us, because in the process of identifying loyal customers it is important for us not to include disloyal customers in this group, i.e. not to miss the disloyal ones. So out of three models, we chose the one with the highest Precision score. This was the model built using the simple predictive tree method. This model will be the basis for our proposed loyalty policy.
+
+### Importance of elements and policies
+
+Having decided on the final model, we need to look at the list of variables that contribute most to the prediction of our target variable (Loyalty_card)
+```{r}
+vip(tree1)+th
+```
+
+Thus, the most important variables for prediction were Class_model, LTV, Gender, days_customer, sat_Entertainment, sat_Seat_comfort, sat_Food, satisfaction_bin and Age.
+
+Based on our analysis using machine learning techniques, we propose the following policy to increase customer loyalty:
+The company should pay more attention to the quality of service in Eco and Eco Plus classes.
+It should also focus on customers between the ages of 20 and 51.
+In terms of services, more attention should be paid to seat comfort, in-flight entertainment, and food.
+
+
+# Bayesian network
+
+Based on the results of our exploratory analysis, cluster analysis and tree model, we decided for ourselves which variables are likely to be important and have the most impact on future results regarding the number of new owners of the loyalty cards. First of all, let's try to build this model by including all variables that are in the data set. 
+
+As a result, we have used variables such as: Class_modal,days_customer, Satisfaction_bin, LTV, mean_serv, Loyalty_card. When we first tried to build the model, the relationships between the data were not defined correctly, so we made some changes. 
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(bnlearn)
+
+# AGE
+airdata_bbn = airdata2
+
+airdata_bbn$mean_serv = round((airdata_bbn$sat_Entertainment + airdata_bbn$sat_Food + airdata_bbn$sat_Seat_comfort)/3)
+airdata_bbn$mean_online = round((airdata_bbn$sat_ease_of_online_booking + airdata_bbn$sat_online_support)/2)
+
+airdata_bbn$Age[airdata_bbn$Age %in% c(7:17)] <- "7-17"
+airdata_bbn$Age[airdata_bbn$Age %in% c(18:24)] <- "18-24"
+airdata_bbn$Age[airdata_bbn$Age %in% c(25:34)] <- "25-34"
+airdata_bbn$Age[airdata_bbn$Age %in% c(35:44)] <- "35-44"
+airdata_bbn$Age[airdata_bbn$Age %in% c(45:54)] <- "45-54"
+airdata_bbn$Age[airdata_bbn$Age %in% c(55:65)] <- "55-65"
+airdata_bbn$Age[airdata_bbn$Age %in% c(66:85)] <- "65+"
+
+# LTV
+# ggplot() +
+  # geom_histogram(data = airdata2, aes(x=LTV), fill = "#9967a2", color = "darkgray", alpha = 0.8) +
+  # theme_minimal()
+# Discretization
+airdata_bbn$LTV <- arules::discretize(airdata_bbn$LTV, breaks = 4)
+# unique(airdata_bbn$LTV)
+# table(airdata_bbn$LTV)
+# Levels: [3.43e+04,8.94e+04) [8.94e+04,1.71e+05) [1.71e+05,2.65e+05) [2.65e+05,1.44e+06]
+
+airdata_bbn$LTV <- as.character(airdata_bbn$LTV)
+airdata_bbn$LTV[airdata_bbn$LTV == "[3.43e+04,8.94e+04)"] <- "Unprofitable"
+airdata_bbn$LTV[airdata_bbn$LTV == "[8.94e+04,1.71e+05)"] <- "Profitable"
+airdata_bbn$LTV[airdata_bbn$LTV == "[1.71e+05,2.65e+05)"] <- "Profitable"
+airdata_bbn$LTV[airdata_bbn$LTV == "[2.65e+05,1.44e+06]"] <- "Very Profitable"
+
+##  Days_customer
+##  Quantiles
+quantile(airdata_bbn$days_customer) 
+## 1  414  909 1741 3431 
+# Defining bins
+airdata_bbn$days_customer <- cut(airdata_bbn$days_customer, breaks = c(0, 414, 909, 1741, 3431))
+## See obtained values
+unique(airdata_bbn$days_customer)
+
+## Recoding for convenience
+airdata_bbn$days_customer <- as.character(airdata_bbn$days_customer)
+unique(airdata_bbn$days_customer)
+## Levels: (1,414] (414,909] (909,1.74e+03] (1.74e+03,3.43e+03]
+airdata_bbn$days_customer[airdata_bbn$days_customer == "(0,414]"] <- "New client"
+airdata_bbn$days_customer[airdata_bbn$days_customer == "(414,909]"] <- "Satisfied client"
+airdata_bbn$days_customer[airdata_bbn$days_customer == "(909,1.74e+03]"] <- "Experienced client"
+airdata_bbn$days_customer[airdata_bbn$days_customer == "(1.74e+03,3.43e+03]"] <- "Old client"
+
+airdata_bbn = airdata_bbn %>% group_by(`...1`) %>% mutate(mean_serv = round((sat_Food + sat_Seat_comfort + sat_Entertainment)/3))
+
+airdata_bbn = airdata_bbn[,-1]
+airdata_bbn = airdata_bbn[,-(21:26)]
+# kable(sum(is.na(airdata_bbn)))%>% 
+#   kable_styling(bootstrap_options=c("bordered", "responsive","striped"), full_width = FALSE)
+
+# I don't think it makes sense to directly change all the variables with grades to low, high, medium, so I'll just factor them in
+
+airdata_bbn[sapply(airdata_bbn, is.numeric)] <- lapply(airdata_bbn[sapply(airdata_bbn, is.numeric)], as.factor)
+airdata_bbn[sapply(airdata_bbn, is.character)] <- lapply(airdata_bbn[sapply(airdata_bbn, is.character)], as.factor)
+```
+
+```{r}
+# gg_miss_var(airdata_bbn)
+bn_data <- airdata_bbn %>% dplyr::select(Class_modal,days_customer, Satisfaction_bin, LTV, mean_serv, Loyalty_card) %>% as.data.frame()
+whitelist = data.frame(from = c("mean_serv","days_customer","Class_modal"), to = c("Loyalty_card", "Loyalty_card","Loyalty_card"))
+bnStructure = hc(bn_data,whitelist = whitelist)
+
+# Сила связи
+str_con <- arc.strength(x = bnStructure, data = bn_data)
+con_plot <- strength.plot(x = bnStructure, strength = str_con, render = F, shape = "ellipse") 
+renderGraph(con_plot)
+```
+
+As we can see, customer loyalty is quite strongly influenced by the class the customer flies, which is not surprising, as in the primary analysis and tree analysis, this variable was quite significant. The variables highlighted earlier also have an effect. The variable mean_serv represents the aggregate of three variables of satisfaction with different services: Food, Entertainment and Seat comfort. 
+
+
+
+
+
+
